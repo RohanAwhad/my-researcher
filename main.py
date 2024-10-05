@@ -3,6 +3,7 @@ import json
 import os
 import requests
 import time
+from typing import List, Dict, Any, Tuple
 
 
 # ===
@@ -211,7 +212,7 @@ answer_checker_tools = [
 import openai
 from typing import List, Dict, Any
 
-def ask_llm(messages: List[Dict[str, str]], tools: List[Dict[str, Any]] = None, tool_choice: str ='auto') -> Dict[str, Any]:
+def ask_llm(messages: List[Dict[str, str]], tools: List[Dict[str, Any]] = None, tool_choice: str = 'auto') -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """
     Ask the LLM a question and get a response.
 
@@ -227,7 +228,7 @@ def ask_llm(messages: List[Dict[str, str]], tools: List[Dict[str, Any]] = None, 
         max_tokens=4096,
         temperature=0.8
     )
-    return response.choices[0].message
+    return response.choices[0].message, response.usage
 
 def process_user_query(query: str) -> str:
     """
@@ -240,9 +241,27 @@ def process_user_query(query: str) -> str:
     history = [{'role': 'system', 'content': first_llm_system_prompt}]
     initial_message = {"role": "user", "content": query}
     history.append(initial_message)
+
+    total_cost: float = 0.0
+    total_input_tokens: int = 0
+    total_cached_input_tokens: int = 0
+    total_completion_tokens: int = 0
+
     while True:
-        assistant_message = ask_llm(history, brave_search_tools)
+
+        assistant_message, usage = ask_llm(history, brave_search_tools)
         history.append(assistant_message)
+
+        total_input_tokens += usage.prompt_tokens
+        total_cached_input_tokens += usage.prompt_tokens_details.cached_tokens
+        total_completion_tokens += usage.completion_tokens
+
+        input_cost = (usage.prompt_tokens - usage.prompt_tokens_details.cached_tokens) * (2.50 / 1_000_000)
+        cached_input_cost = usage.prompt_tokens_details.cached_tokens * (1.25 / 1_000_000)
+        output_cost = usage.completion_tokens * (10.00 / 1_000_000)
+        current_cost = input_cost + cached_input_cost + output_cost
+        total_cost += current_cost
+
         if assistant_message.tool_calls:
             if assistant_message.content:
                 print(assistant_message.content)
@@ -264,10 +283,27 @@ def process_user_query(query: str) -> str:
                 {'role': 'system', 'content': answer_checker_system_prompt},
                 {'role': 'user', 'content': input_to_answer_checker},
             ]
-            answer_checker_response = ask_llm(answer_checker_history, answer_checker_tools, tool_choice='required')
+            answer_checker_response, usage = ask_llm(answer_checker_history, answer_checker_tools, tool_choice='required')
+
+            total_input_tokens += usage.prompt_tokens
+            total_cached_input_tokens += usage.prompt_tokens_details.cached_tokens
+            total_completion_tokens += usage.completion_tokens
+
+            input_cost = (usage.prompt_tokens - usage.prompt_tokens_details.cached_tokens) * (2.50 / 1_000_000)
+            cached_input_cost = usage.prompt_tokens_details.cached_tokens * (1.25 / 1_000_000)
+            output_cost = usage.completion_tokens * (10.00 / 1_000_000)
+            current_cost = input_cost + cached_input_cost + output_cost
+            total_cost += current_cost
+
             function_call = answer_checker_response.tool_calls[0]
             if function_call.function.name == 'return_answer_to_user':
-                return assistant_message.content
+                cost_details: Dict[str, float] = {
+                    "total_input_tokens_cost": (total_input_tokens - total_cached_input_tokens) * (2.50 / 1_000_000),
+                    "total_cached_input_tokens_cost": total_cached_input_tokens * (1.25 / 1_000_000),
+                    "total_completion_tokens_cost": total_completion_tokens * (10.00 / 1_000_000),
+                    "total_cost": total_cost
+                }
+                return assistant_message.content, cost_details
             elif function_call.function.name == 'regenerate_answer':
                 suggestion = json.loads(function_call.function.arguments).get('suggestion', '')
                 print('LLM Suggestion:', suggestion)
@@ -275,9 +311,17 @@ def process_user_query(query: str) -> str:
 
 # Example usage
 if __name__ == "__main__":
-    user_question = input("What's your question? ")
-    response = process_user_query(user_question)
+    user_question: str = input("What's your question? ")
+    response, cost_details = process_user_query(user_question)
     print(f"Response: {response}")
+    print(f"Total cost: ${cost_details['total_cost']:.4f}")
+    
     with open('response.md', 'w') as f:
         f.write(response)
+        f.write(f"\n\nTotal cost: ${cost_details['total_cost']:.4f}")
+    
+    with open('cost_details.json', 'w') as f:
+        json.dump(cost_details, f, indent=2)
+
+
 
